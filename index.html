@@ -33,27 +33,19 @@
     border-radius: 8px;
   }
   #controls {
-    position: absolute;
-    left: 0; right: 0; bottom: 0;
     display: flex;
-    justify-content: space-between;
-    padding: 18px;
-    box-sizing: border-box;
-    pointer-events: none;
-  }
-  #controls .pad {
-    display: flex;
-    gap: 12px;
-    pointer-events: auto;
+    justify-content: center;
+    gap: 24px;
+    padding: 16px 0 4px;
   }
   #controls button {
-    width: 64px;
-    height: 64px;
+    width: 84px;
+    height: 84px;
     border-radius: 50%;
     border: 2px solid rgba(255,255,255,0.35);
     background: rgba(255,255,255,0.12);
     color: #fff;
-    font-size: 26px;
+    font-size: 34px;
     line-height: 1;
     -webkit-tap-highlight-color: transparent;
     touch-action: none;
@@ -121,14 +113,8 @@
     <p class="hint">Press SPACE or tap here to start</p>
   </div>
   <div id="controls">
-    <div class="pad">
-      <button id="btnLeft" aria-label="Left">&#8592;</button>
-      <button id="btnRight" aria-label="Right">&#8594;</button>
-    </div>
-    <div class="pad">
-      <button id="btnUp" aria-label="Forward">&#8593;</button>
-      <button id="btnDown" aria-label="Back">&#8595;</button>
-    </div>
+    <button id="btnLeft" aria-label="Left">&#8592;</button>
+    <button id="btnRight" aria-label="Right">&#8594;</button>
   </div>
 </div>
 
@@ -767,10 +753,6 @@
     () => { if (state === 'playing') lane = Math.max(0, lane - 1); }, () => {});
   bindHold(document.getElementById('btnRight'),
     () => { if (state === 'playing') lane = Math.min(LANE_COUNT - 1, lane + 1); }, () => {});
-  bindHold(document.getElementById('btnUp'),
-    () => { movingUp = true; }, () => { movingUp = false; });
-  bindHold(document.getElementById('btnDown'),
-    () => { movingDown = true; }, () => { movingDown = false; });
 
   function loop(timestamp) {
     if (state === 'playing') {
