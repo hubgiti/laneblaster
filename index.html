@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Lane Blaster</title>
+<style>
+  html, body {
+    margin: 0;
+    height: 100%;
+    height: 100dvh;
+    background: #0d0d1a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Segoe UI', Arial, sans-serif;
+    color: #fff;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+  #wrap {
+    position: relative;
+    transform-origin: center center;
+  }
+  canvas {
+    background: #1b1b2f;
+    display: block;
+    border: 4px solid #444;
+    border-radius: 8px;
+  }
+  #controls {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 18px;
+    box-sizing: border-box;
+    pointer-events: none;
+  }
+  #controls .pad {
+    display: flex;
+    gap: 12px;
+    pointer-events: auto;
+  }
+  #controls button {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: 2px solid rgba(255,255,255,0.35);
+    background: rgba(255,255,255,0.12);
+    color: #fff;
+    font-size: 26px;
+    line-height: 1;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: none;
+  }
+  #controls button:active {
+    background: rgba(255,255,255,0.28);
+  }
+  @media (hover: hover) and (pointer: fine) {
+    #controls { display: none; }
+  }
+  /* While the start/game-over overlay is showing, let taps pass through the
+     D-pad (its sibling, painted on top) instead of being swallowed by it. */
+  #overlay:not(.hidden) ~ #controls,
+  #overlay:not(.hidden) ~ #controls * {
+    pointer-events: none;
+  }
+  #hud {
+    position: absolute;
+    top: 16px;
+    left: 16px;
+    font-size: 22px;
+    font-weight: bold;
+    text-shadow: 0 0 6px rgba(0,0,0,0.8);
+  }
+  #overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.65);
+    text-align: center;
+  }
+  #overlay h1 {
+    font-size: 42px;
+    margin: 0 0 10px;
+  }
+  #overlay p {
+    margin: 4px 0;
+    font-size: 18px;
+    opacity: 0.85;
+  }
+  #overlay .hint {
+    margin-top: 20px;
+    font-size: 16px;
+    opacity: 0.7;
+  }
+  .hidden {
+    display: none !important;
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">Score: 0</div>
+  <canvas id="game" width="480" height="640"></canvas>
+  <div id="overlay">
+    <h1>Lane Blaster</h1>
+    <p>Use &#8592; and &#8594; to switch lanes, &#8593; and &#8595; to move forward and back (up to the halfway line).</p>
+    <p>Your stick man auto-fires light beams. Line up with red enemies to destroy them before they reach you.</p>
+    <p>Grab the &#9889; orbs for a permanent rate-of-fire boost.</p>
+    <p>Grab the &#9829; orbs to add another stick man &mdash; more firepower and an extra life.</p>
+    <p>Grab the &#10052; orbs to permanently slow down approaching enemies.</p>
+    <p class="hint">Press SPACE or tap here to start</p>
+  </div>
+  <div id="controls">
+    <div class="pad">
+      <button id="btnLeft" aria-label="Left">&#8592;</button>
+      <button id="btnRight" aria-label="Right">&#8594;</button>
+    </div>
+    <div class="pad">
+      <button id="btnUp" aria-label="Forward">&#8593;</button>
+      <button id="btnDown" aria-label="Back">&#8595;</button>
+    </div>
+  </div>
+</div>
+
+<audio id="bgMusic" src="Palms.mp3" loop preload="auto"></audio>
+
+<script>
+(function () {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const hud = document.getElementById('hud');
+  const overlay = document.getElementById('overlay');
+  const wrap = document.getElementById('wrap');
+
+  const W = canvas.width;
+  const H = canvas.height;
+  const LANE_COUNT = 3;
+  const LANE_WIDTH = W / LANE_COUNT;
+
+  const PLAYER_HEIGHT = 58;
+  const PLAYER_MAX_Y = H - PLAYER_HEIGHT - 30; // starting position, closest to the bottom
+  const PLAYER_MIN_Y = H / 2; // can't advance past the halfway point of the screen
+  const PLAYER_MOVE_SPEED = 220; // px/sec, front/back movement
+
+  const BULLET_W = 6;
+  const BULLET_H = 18;
+  const BULLET_SPEED = 480;
+
+  const ENEMY_BASE_HEIGHT = 50;
+  const ENEMY_HITBOX_SCALE = 0.9; // collision box is 10% smaller than the visual sprite
+
+  const POWERUP_SIZE = 28;
+  const POWERUP_SPEED = 150;
+  const SLOW_FACTOR = 0.9; // permanent multiplier applied to enemy speed each time the green power-up is collected (stacks)
+
+  const WALK_CYCLE_SPEED = 9; // radians/sec, leg swing rate
+  const FLOOR_TICK_SPACING = 70;
+
+  let state = 'ready'; // ready | playing | gameover
+  let lane = 1; // 0, 1, 2 (left, center, right)
+  let lives = 1; // number of stick men left (main hero + companions)
+  let bullets = [];
+  let enemies = [];
+  let powerUps = [];
+  let score = 0;
+  let kills = 0;
+  let elapsed = 0;
+
+  let fireTimer = 0;
+  let fireSoundTimer = 0;
+  let enemySpawnTimer = 0;
+  let powerUpSpawnTimer = 0;
+  let nextPowerUpSpawn = randomPowerUpInterval();
+  let fireRateMultiplier = 1;
+  let speedMultiplier = 1;
+  let playerWalkPhase = 0;
+  let floorScroll = 0;
+  let playerY = PLAYER_MAX_Y;
+  let movingUp = false;
+  let movingDown = false;
+  let lastTime = null;
+
+  function laneCenterX(l) {
+    return l * LANE_WIDTH + LANE_WIDTH / 2;
+  }
+
+  // Collision box centered within the enemy's visual sprite, shrunk by ENEMY_HITBOX_SCALE.
+  function enemyHitbox(e) {
+    const fullHeight = ENEMY_BASE_HEIGHT * e.scale;
+    const h = fullHeight * ENEMY_HITBOX_SCALE;
+    const y = e.y + (fullHeight - h) / 2;
+    return { y, h };
+  }
+
+  // Evenly spaced x-offsets for `count` stick men standing side by side.
+  function companionOffsets(count) {
+    const spacing = 20;
+    const total = (count - 1) * spacing;
+    const offsets = [];
+    for (let i = 0; i < count; i++) {
+      offsets.push(-total / 2 + i * spacing);
+    }
+    return offsets;
+  }
+
+  function resetGame() {
+    lane = 1;
+    lives = 1;
+    bullets = [];
+    enemies = [];
+    powerUps = [];
+    score = 0;
+    kills = 0;
+    elapsed = 0;
+    fireTimer = 0;
+    fireSoundTimer = 0;
+    enemySpawnTimer = 0;
+    powerUpSpawnTimer = 0;
+    nextPowerUpSpawn = randomPowerUpInterval();
+    fireRateMultiplier = 1;
+    speedMultiplier = 1;
+    playerWalkPhase = 0;
+    floorScroll = 0;
+    playerY = PLAYER_MAX_Y;
+    movingUp = false;
+    movingDown = false;
+    lastTime = null;
+  }
+
+  // --- Audio -----------------------------------------------------------------
+
+  let audioCtx = null;
+  const FIRE_SOUND_MIN_GAP = 0.15; // fastest the fire sound is ever allowed to repeat
+
+  function getAudioCtx() {
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    return audioCtx;
+  }
+
+  // Background music is the provided mp3, kept quiet and only playing while
+  // a round is actually in progress.
+  const bgMusic = document.getElementById('bgMusic');
+  bgMusic.volume = 0.25;
+
+  function playBackgroundMusic() {
+    bgMusic.play().catch(() => {}); // ignored if blocked before any user gesture
+  }
+
+  function stopBackgroundMusic() {
+    bgMusic.pause();
+  }
+
+  // Short synthesized laser blip standing in for gunfire in general, played on
+  // its own timer (see update()) rather than per shot so it never spams. Its
+  // interval floors at FIRE_SOUND_MIN_GAP, so once the fire rate climbs past
+  // that cap the sound just keeps repeating at that fastest capped speed.
+  function playFireSound() {
+    const ctx = getAudioCtx();
+    const now = ctx.currentTime;
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(700, now);
+    osc.frequency.exponentialRampToValueAtTime(150, now + 0.1);
+
+    filter.type = 'lowpass';
+    filter.frequency.value = 2200;
+
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.linearRampToValueAtTime(0.12, now + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.13);
+  }
+
+  // --- Difficulty scaling -------------------------------------------------
+
+  function fireInterval() {
+    // Starts slow, ramps up to a fast-but-fair floor.
+    return Math.max(0.35, 1.3 - elapsed * 0.02);
+  }
+
+  function effectiveFireInterval() {
+    return Math.max(0.06, fireInterval() / fireRateMultiplier);
+  }
+
+  // Beam color/damage tier at the current fire rate: hotter fire rate, harder-hitting beams.
+  function fireRateTier() {
+    if (fireRateMultiplier > 5.5) return { damage: 4, color: '#ff4d4d' };
+    if (fireRateMultiplier > 3) return { damage: 2, color: '#4db8ff' };
+    return { damage: 1, color: '#fff6a0' };
+  }
+
+  function randomPowerUpInterval() {
+    return 6.5 + Math.random() * 4; // 6.5-10.5s between power-up spawns
+  }
+
+  function enemySpawnInterval() {
+    return Math.max(0.45, 1.6 - elapsed * 0.025);
+  }
+
+  function enemySpeed() {
+    return (90 + elapsed * 7) * speedMultiplier;
+  }
+
+  // Hit points double every 5000 score points, starting at a score of 10000.
+  function enemyHpMultiplier() {
+    if (score < 11000) return 1;
+    const doublings = Math.floor((score - 10000) / 10000) + 1;
+    return Math.pow(2, doublings);
+  }
+
+  function bigEnemyChance() {
+    return Math.min(0.45, 0.05 + elapsed * 0.01);
+  }
+
+  function pickEnemyLane() {
+    // Mostly the middle lane, but side lanes show up more often over time.
+    const sideChance = Math.min(0.4, 0.12 + elapsed * 0.006);
+    const r = Math.random();
+    if (r < sideChance) return 0;
+    if (r < sideChance * 2) return 2;
+    return 1;
+  }
+
+  // --- Spawning ------------------------------------------------------------
+
+  function fireBullet() {
+    const tier = fireRateTier();
+    // Every stick man in the group fires its own shot.
+    for (const offsetX of companionOffsets(lives)) {
+      bullets.push({
+        lane: lane,
+        offsetX: offsetX,
+        y: playerY - BULLET_H,
+        damage: tier.damage,
+        color: tier.color,
+      });
+    }
+  }
+
+  function spawnPowerUp() {
+    const l = Math.floor(Math.random() * LANE_COUNT);
+    const r = Math.random();
+    const type = r < 1 / 3 ? 'fireRate' : (r < 2 / 3 ? 'life' : 'slow');
+    powerUps.push({ lane: l, y: -POWERUP_SIZE, type: type });
+  }
+
+  function spawnEnemy() {
+    const big = Math.random() < bigEnemyChance();
+    const scale = big ? 1.6 : 1;
+    const hp = (big ? 2 : 1) * enemyHpMultiplier();
+    enemies.push({
+      lane: pickEnemyLane(),
+      y: -ENEMY_BASE_HEIGHT * scale,
+      offsetX: 0,
+      scale: scale,
+      hp: hp,
+      maxHp: hp,
+      type: big ? 'big' : 'normal',
+      hitFlash: 0,
+      walkPhase: Math.random() * Math.PI * 2,
+    });
+  }
+
+  // 1, 2, or 3 stick men of the given kind ('normal' | 'big' | 'boss') side by side in one lane.
+  function spawnGroup(count, kind) {
+    const l = Math.floor(Math.random() * LANE_COUNT);
+    const scale = kind === 'boss' ? 1.8 : (kind === 'big' ? 1.6 : 1);
+    const hp = (kind === 'boss' ? 5 : (kind === 'big' ? 2 : 1)) * enemyHpMultiplier();
+    const unit = 16 * scale;
+    const spacing = count >= 3 ? unit * 0.9 : unit;
+    const offsets = count >= 3 ? [-spacing, 0, spacing] : count === 2 ? [-spacing, spacing] : [0];
+    for (const offsetX of offsets) {
+      enemies.push({
+        lane: l,
+        y: -ENEMY_BASE_HEIGHT * scale,
+        offsetX: offsetX,
+        scale: scale,
+        hp: hp,
+        maxHp: hp,
+        type: kind,
+        hitFlash: 0,
+        walkPhase: Math.random() * Math.PI * 2,
+      });
+    }
+  }
+
+  // Chooses which kind of wave to spawn based on the current score.
+  function spawnEnemyWave() {
+    if (score >= 5000) {
+      // Only the stronger red enemies and blue bosses remain, in random group sizes.
+      const count = 1 + Math.floor(Math.random() * 3); // 1, 2, or 3
+      const kind = Math.random() < 0.4 ? 'boss' : 'big';
+      spawnGroup(count, kind);
+      return;
+    }
+    if (score >= 3000 && Math.random() < 0.12) {
+      spawnGroup(2, 'boss');
+      return;
+    }
+    if (score >= 2000 && Math.random() < 0.10) {
+      spawnGroup(1, 'boss');
+      return;
+    }
+    if (score >= 2000 && Math.random() < 0.16) {
+      spawnGroup(3, 'normal');
+      return;
+    }
+    if (score >= 1000 && Math.random() < 0.22) {
+      spawnGroup(2, 'normal');
+      return;
+    }
+    spawnEnemy();
+  }
+
+  // --- Update ----------------------------------------------------------------
+
+  function update(dt) {
+    elapsed += dt;
+    score += dt * 8;
+
+    // Auto-fire
+    fireTimer += dt;
+    if (fireTimer >= effectiveFireInterval()) {
+      fireTimer = 0;
+      fireBullet();
+    }
+
+    // General fire sound, on its own timer so it never fires faster than the cap
+    fireSoundTimer += dt;
+    const fireSoundInterval = Math.max(FIRE_SOUND_MIN_GAP, effectiveFireInterval());
+    if (fireSoundTimer >= fireSoundInterval) {
+      fireSoundTimer = 0;
+      playFireSound();
+    }
+
+    // Spawn enemies
+    enemySpawnTimer += dt;
+    if (enemySpawnTimer >= enemySpawnInterval()) {
+      enemySpawnTimer = 0;
+      spawnEnemyWave();
+    }
+
+    // Spawn power-ups
+    powerUpSpawnTimer += dt;
+    if (powerUpSpawnTimer >= nextPowerUpSpawn) {
+      powerUpSpawnTimer = 0;
+      nextPowerUpSpawn = randomPowerUpInterval();
+      spawnPowerUp();
+    }
+
+    // Scroll the floor at the current game pace
+    floorScroll = (floorScroll + enemySpeed() * dt) % FLOOR_TICK_SPACING;
+    playerWalkPhase += dt * WALK_CYCLE_SPEED;
+
+    // Front/back movement, clamped between the halfway line and the starting spot
+    if (movingUp) playerY -= PLAYER_MOVE_SPEED * dt;
+    if (movingDown) playerY += PLAYER_MOVE_SPEED * dt;
+    playerY = Math.min(PLAYER_MAX_Y, Math.max(PLAYER_MIN_Y, playerY));
+
+    // Move bullets
+    for (const b of bullets) b.y -= BULLET_SPEED * dt;
+    bullets = bullets.filter(b => b.y + BULLET_H > 0);
+
+    // Move enemies
+    const speed = enemySpeed();
+    for (const e of enemies) {
+      e.y += speed * dt;
+      e.walkPhase += dt * WALK_CYCLE_SPEED;
+      if (e.hitFlash > 0) e.hitFlash -= dt;
+    }
+
+    // Move power-ups and check collection
+    for (const p of powerUps) p.y += POWERUP_SPEED * dt;
+    for (const p of powerUps) {
+      if (p.lane !== lane) continue;
+      const overlapY = playerY < p.y + POWERUP_SIZE && playerY + PLAYER_HEIGHT > p.y;
+      if (overlapY) {
+        p.collected = true;
+        if (p.type === 'life') {
+          lives += 1;
+        } else if (p.type === 'slow') {
+          speedMultiplier *= SLOW_FACTOR;
+        } else {
+          fireRateMultiplier *= 1.15;
+        }
+      }
+    }
+    powerUps = powerUps.filter(p => !p.collected && p.y < H + POWERUP_SIZE);
+
+    // Bullet vs enemy collisions
+    for (const e of enemies) {
+      const { y: hy, h: eh } = enemyHitbox(e);
+      for (const b of bullets) {
+        if (b.hit) continue;
+        if (b.lane !== e.lane) continue;
+        if (b.y < hy + eh && b.y + BULLET_H > hy) {
+          b.hit = true;
+          e.hp -= b.damage;
+          e.hitFlash = 0.12;
+        }
+      }
+    }
+    bullets = bullets.filter(b => !b.hit);
+
+    const destroyed = enemies.filter(e => e.hp <= 0);
+    if (destroyed.length) {
+      for (const e of destroyed) {
+        let reward = 50;
+        if (e.type === 'boss') reward = 300;
+        else if (e.type === 'big') reward = 120;
+        score += reward;
+        kills += 1;
+      }
+      enemies = enemies.filter(e => e.hp > 0);
+    }
+
+    // Enemy vs player collision - each enemy that reaches the hero costs one stick man
+    const collidingEnemies = enemies.filter(e => {
+      if (e.lane !== lane) return false;
+      const { y: hy, h: eh } = enemyHitbox(e);
+      return playerY < hy + eh && playerY + PLAYER_HEIGHT > hy;
+    });
+    if (collidingEnemies.length) {
+      lives -= collidingEnemies.length;
+      enemies = enemies.filter(e => !collidingEnemies.includes(e));
+      if (lives <= 0) {
+        gameOver();
+        return;
+      }
+    }
+
+    enemies = enemies.filter(e => e.y < H + ENEMY_BASE_HEIGHT * 2);
+  }
+
+  // --- Drawing ---------------------------------------------------------------
+
+  function drawLanes() {
+    ctx.fillStyle = '#1b1b2f';
+    ctx.fillRect(0, 0, W, H);
+
+    // Scrolling floor ticks, giving a sense of forward motion.
+    ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+    ctx.lineWidth = 4;
+    ctx.setLineDash([]);
+    for (let y = -FLOOR_TICK_SPACING; y < H + FLOOR_TICK_SPACING; y += FLOOR_TICK_SPACING) {
+      const ty = y + floorScroll;
+      ctx.beginPath();
+      ctx.moveTo(0, ty);
+      ctx.lineTo(W, ty);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 3;
+    for (let i = 1; i < LANE_COUNT; i++) {
+      const x = i * LANE_WIDTH;
+      ctx.setLineDash([16, 14]);
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  // Generic stick figure. (cx, topY) = top-center of bounding box, height = total height.
+  function drawStickFigure(cx, topY, height, color, lineWidth, legPhase) {
+    const headR = height * 0.14;
+    const headCy = topY + headR;
+    const shoulderY = topY + headR * 2 + 2;
+    const hipY = topY + height * 0.62;
+    const feetY = topY + height;
+    const armSpan = height * 0.28;
+    const legSpan = height * 0.16;
+    const stepAmp = legSpan * 0.7;
+    const phase = legPhase || 0;
+    const leftFootX = cx - legSpan + Math.sin(phase) * stepAmp;
+    const rightFootX = cx + legSpan + Math.sin(phase + Math.PI) * stepAmp;
+
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+
+    // Head
+    ctx.beginPath();
+    ctx.arc(cx, headCy, headR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Body
+    ctx.beginPath();
+    ctx.moveTo(cx, shoulderY);
+    ctx.lineTo(cx, hipY);
+    ctx.stroke();
+
+    // Arms
+    ctx.beginPath();
+    ctx.moveTo(cx - armSpan, shoulderY + height * 0.05);
+    ctx.lineTo(cx, shoulderY + height * 0.1);
+    ctx.lineTo(cx + armSpan, shoulderY + height * 0.05);
+    ctx.stroke();
+
+    // Legs (walking cycle)
+    ctx.beginPath();
+    ctx.moveTo(leftFootX, feetY);
+    ctx.lineTo(cx, hipY);
+    ctx.lineTo(rightFootX, feetY);
+    ctx.stroke();
+
+    return { headCy, headR };
+  }
+
+  function drawPlayer() {
+    const cx = laneCenterX(lane);
+    const glow = Math.max(0, 1 - fireTimer / effectiveFireInterval());
+    const glowColor = fireRateMultiplier > 1 ? '120, 255, 210' : '255, 245, 160';
+
+    for (const offsetX of companionOffsets(lives)) {
+      const { headCy, headR } = drawStickFigure(cx + offsetX, playerY, PLAYER_HEIGHT, '#111111', 4, playerWalkPhase);
+
+      // Muzzle glow at the top of the head, brighter right after firing.
+      ctx.fillStyle = `rgba(${glowColor}, ${0.25 + glow * 0.6})`;
+      ctx.beginPath();
+      ctx.arc(cx + offsetX, headCy - headR, 3 + glow * 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function drawEnemies() {
+    for (const e of enemies) {
+      const cx = laneCenterX(e.lane) + (e.offsetX || 0);
+      const height = ENEMY_BASE_HEIGHT * e.scale;
+      const lineWidth = 3 + e.scale;
+      let color;
+      if (e.hitFlash > 0) color = '#ffffff';
+      else if (e.type === 'boss') color = '#3da5ff';
+      else if (e.type === 'big') color = '#ff2d2d';
+      else color = '#ff6b6b';
+      drawStickFigure(cx, e.y, height, color, lineWidth, e.walkPhase);
+    }
+  }
+
+  function drawBullets() {
+    for (const b of bullets) {
+      const cx = laneCenterX(b.lane) + (b.offsetX || 0);
+      const grad = ctx.createLinearGradient(0, b.y, 0, b.y + BULLET_H);
+      grad.addColorStop(0, 'rgba(255,255,255,0)');
+      grad.addColorStop(1, b.color || '#fff6a0');
+      ctx.fillStyle = grad;
+      ctx.fillRect(cx - BULLET_W / 2, b.y, BULLET_W, BULLET_H);
+    }
+  }
+
+  function drawPowerUps() {
+    const t = performance.now() / 200;
+    for (const p of powerUps) {
+      const cx = laneCenterX(p.lane);
+      const cy = p.y + POWERUP_SIZE / 2;
+      const pulse = 1 + Math.sin(t + p.lane) * 0.08;
+      const isLife = p.type === 'life';
+      const isSlow = p.type === 'slow';
+      const rgb = isLife ? '255, 90, 90' : (isSlow ? '90, 220, 120' : '120, 255, 210');
+
+      const grad = ctx.createRadialGradient(cx, cy, 2, cx, cy, POWERUP_SIZE * pulse);
+      grad.addColorStop(0, `rgba(${rgb}, 0.9)`);
+      grad.addColorStop(1, `rgba(${rgb}, 0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, POWERUP_SIZE * pulse, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.font = '22px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(isLife ? '♥' : (isSlow ? '❄' : '⚡'), cx, cy + 1);
+    }
+  }
+
+  function draw() {
+    drawLanes();
+    drawBullets();
+    drawPowerUps();
+    drawEnemies();
+    drawPlayer();
+  }
+
+  function gameOver() {
+    state = 'gameover';
+    stopBackgroundMusic();
+    overlay.classList.remove('hidden');
+    overlay.innerHTML = `
+      <h1>Game Over</h1>
+      <p>Score: ${Math.floor(score)} &middot; Kills: ${kills}</p>
+      <p class="hint">Press SPACE to try again</p>
+    `;
+  }
+
+  function startGame() {
+    getAudioCtx(); // unlock audio while still inside a user gesture (needed on iOS)
+    playBackgroundMusic();
+    resetGame();
+    state = 'playing';
+    overlay.classList.add('hidden');
+  }
+
+  // --- Responsive scaling (fit the fixed-resolution game to any screen) -----
+
+  function fitToScreen() {
+    const availW = window.visualViewport ? window.visualViewport.width : window.innerWidth;
+    const availH = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    const wrapW = wrap.offsetWidth;
+    const wrapH = wrap.offsetHeight;
+    const scale = Math.min(availW / wrapW, availH / wrapH, 1) * 0.98;
+    wrap.style.transform = `scale(${scale})`;
+  }
+
+  window.addEventListener('resize', fitToScreen);
+  window.addEventListener('orientationchange', fitToScreen);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', fitToScreen);
+  fitToScreen();
+
+  // --- Touch controls ---------------------------------------------------
+
+  document.addEventListener('touchmove', (e) => e.preventDefault(), { passive: false });
+
+  overlay.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if (state !== 'playing') startGame();
+  }, { passive: false });
+  overlay.addEventListener('click', () => {
+    if (state !== 'playing') startGame();
+  });
+
+  function bindHold(el, onStart, onEnd) {
+    const start = (e) => { e.preventDefault(); onStart(); };
+    const end = (e) => { e.preventDefault(); onEnd(); };
+    el.addEventListener('touchstart', start, { passive: false });
+    el.addEventListener('touchend', end);
+    el.addEventListener('touchcancel', end);
+    el.addEventListener('mousedown', start);
+    el.addEventListener('mouseup', end);
+    el.addEventListener('mouseleave', end);
+  }
+
+  bindHold(document.getElementById('btnLeft'),
+    () => { if (state === 'playing') lane = Math.max(0, lane - 1); }, () => {});
+  bindHold(document.getElementById('btnRight'),
+    () => { if (state === 'playing') lane = Math.min(LANE_COUNT - 1, lane + 1); }, () => {});
+  bindHold(document.getElementById('btnUp'),
+    () => { movingUp = true; }, () => { movingUp = false; });
+  bindHold(document.getElementById('btnDown'),
+    () => { movingDown = true; }, () => { movingDown = false; });
+
+  function loop(timestamp) {
+    if (state === 'playing') {
+      if (lastTime === null) lastTime = timestamp;
+      const dt = Math.min(0.05, (timestamp - lastTime) / 1000);
+      lastTime = timestamp;
+
+      update(dt);
+      if (state === 'playing') {
+        draw();
+        let hudText = 'Score: ' + Math.floor(score) + ' · Lives: ' + lives + ' · Kills: ' + kills;
+        if (fireRateMultiplier > 1) {
+          hudText += ' · ⚡ Fire Rate x' + fireRateMultiplier.toFixed(2);
+        }
+        if (speedMultiplier < 1) {
+          hudText += ' · ❄ Speed x' + speedMultiplier.toFixed(2);
+        }
+        hud.textContent = hudText;
+      }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (state !== 'playing') startGame();
+      return;
+    }
+    if (state !== 'playing') return;
+
+    if (e.code === 'ArrowLeft') {
+      e.preventDefault();
+      lane = Math.max(0, lane - 1);
+    } else if (e.code === 'ArrowRight') {
+      e.preventDefault();
+      lane = Math.min(LANE_COUNT - 1, lane + 1);
+    } else if (e.code === 'ArrowUp') {
+      e.preventDefault();
+      movingUp = true;
+    } else if (e.code === 'ArrowDown') {
+      e.preventDefault();
+      movingDown = true;
+    }
+  });
+
+  window.addEventListener('keyup', (e) => {
+    if (e.code === 'ArrowUp') movingUp = false;
+    else if (e.code === 'ArrowDown') movingDown = false;
+  });
+
+  draw();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
